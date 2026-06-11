@@ -92,20 +92,23 @@ def test_fetch_account_usage_codex(monkeypatch):
     assert snapshot.windows[0].label == "Session"
     assert snapshot.windows[0].used_percent == 15.0
     assert snapshot.windows[0].reset_at == datetime.fromtimestamp(1_900_000_000, tz=timezone.utc)
+    assert snapshot.windows[0].period_seconds == 18_000
+    assert snapshot.windows[1].period_seconds == 604_800
     assert "Credits balance: $12.50" in snapshot.details
 
 
 def test_render_account_usage_lines_includes_reset_and_provider():
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     snapshot = AccountUsageSnapshot(
         provider="openai-codex",
         source="usage_api",
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=now,
         plan="Pro",
         windows=(
             AccountUsageWindow(
                 label="Session",
                 used_percent=25,
-                reset_at=datetime.now(timezone.utc),
+                reset_at=now,
             ),
         ),
         details=("Credits balance: $9.99",),
@@ -114,8 +117,29 @@ def test_render_account_usage_lines_includes_reset_and_provider():
 
     assert lines[0] == "📈 Account limits"
     assert "openai-codex (Pro)" in lines[1]
-    assert "Session: 75% remaining (25% used)" in lines[2]
+    assert "Session: 25% used" in lines[2]
     assert "Credits balance: $9.99" in lines[3]
+
+
+def test_render_account_usage_lines_compares_usage_to_elapsed_time():
+    now = datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc)
+    snapshot = AccountUsageSnapshot(
+        provider="openai-codex",
+        source="usage_api",
+        fetched_at=now,
+        windows=(
+            AccountUsageWindow(
+                label="Session",
+                used_percent=25,
+                reset_at=datetime(2026, 1, 1, 15, 0, tzinfo=timezone.utc),
+                period_seconds=18_000,
+            ),
+        ),
+    )
+
+    lines = render_account_usage_lines(snapshot)
+
+    assert "Session: 25% used • 50% elapsed • ahead by 1h" in lines[2]
 
 
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -28,6 +28,7 @@ class AccountUsageWindow:
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
     detail: Optional[str] = None
+    period_seconds: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,29 @@ def _format_reset(dt: Optional[datetime]) -> str:
     return f"{rel} ({local_dt.strftime('%Y-%m-%d %H:%M %Z')})"
 
 
+def _format_window_pace(window: AccountUsageWindow, *, as_of: datetime) -> Optional[str]:
+    """Return elapsed/pace text for fixed-duration quota windows."""
+    if window.used_percent is None or not window.reset_at or not window.period_seconds:
+        return None
+    if window.period_seconds <= 0:
+        return None
+    used_pct = max(0.0, min(100.0, float(window.used_percent)))
+    reset_at = window.reset_at if window.reset_at.tzinfo else window.reset_at.replace(tzinfo=timezone.utc)
+    as_of = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+    start_at = reset_at - timedelta(seconds=window.period_seconds)
+    elapsed_seconds = (as_of - start_at).total_seconds()
+    elapsed_pct = max(0.0, min(100.0, elapsed_seconds / window.period_seconds * 100.0))
+    delta_hours = (elapsed_pct - used_pct) / 100.0 * (window.period_seconds / 3600.0)
+    whole_hours = int(math.floor(abs(delta_hours) + 0.5))
+    if whole_hours == 0:
+        pace = "on pace"
+    elif delta_hours > 0:
+        pace = f"ahead by {whole_hours}h"
+    else:
+        pace = f"behind by {whole_hours}h"
+    return f"{round(elapsed_pct)}% elapsed • {pace}"
+
+
 def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, markdown: bool = False) -> list[str]:
     if not snapshot:
         return []
@@ -105,9 +129,11 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
         if window.used_percent is None:
             base = f"{window.label}: unavailable"
         else:
-            remaining = max(0, round(100 - float(window.used_percent)))
-            used = max(0, round(float(window.used_percent)))
-            base = f"{window.label}: {remaining}% remaining ({used}% used)"
+            used = max(0, min(100, round(float(window.used_percent))))
+            base = f"{window.label}: {used}% used"
+            pace = _format_window_pace(window, as_of=snapshot.fetched_at)
+            if pace:
+                base += f" • {pace}"
         if window.reset_at:
             base += f" • resets {_format_reset(window.reset_at)}"
         elif window.detail:
@@ -376,6 +402,7 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
                 label=label,
                 used_percent=float(used),
                 reset_at=_parse_dt(window.get("reset_at")),
+                period_seconds=int(window.get("limit_window_seconds") or (18_000 if key == "primary_window" else 604_800)),
             )
         )
     details: list[str] = []
@@ -420,12 +447,12 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
     payload = response.json() or {}
     windows: list[AccountUsageWindow] = []
     mapping = (
-        ("five_hour", "Current session"),
-        ("seven_day", "Current week"),
-        ("seven_day_opus", "Opus week"),
-        ("seven_day_sonnet", "Sonnet week"),
+        ("five_hour", "Current session", 18_000),
+        ("seven_day", "Current week", 604_800),
+        ("seven_day_opus", "Opus week", 604_800),
+        ("seven_day_sonnet", "Sonnet week", 604_800),
     )
-    for key, label in mapping:
+    for key, label, period_seconds in mapping:
         window = payload.get(key) or {}
         util = window.get("utilization")
         if util is None:
@@ -436,6 +463,7 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
                 label=label,
                 used_percent=used,
                 reset_at=_parse_dt(window.get("resets_at")),
+                period_seconds=period_seconds,
             )
         )
     details: list[str] = []
