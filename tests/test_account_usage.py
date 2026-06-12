@@ -139,7 +139,7 @@ def test_render_account_usage_lines_compares_usage_to_elapsed_time():
 
     lines = render_account_usage_lines(snapshot)
 
-    assert "Session: 25% used • 50% elapsed • ahead by 1h" in lines[2]
+    assert "Session: 25% used • 50% elapsed • behind by 1h" in lines[2]
 
 
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):

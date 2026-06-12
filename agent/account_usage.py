@@ -110,9 +110,9 @@ def _format_window_pace(window: AccountUsageWindow, *, as_of: datetime) -> Optio
     if whole_hours == 0:
         pace = "on pace"
     elif delta_hours > 0:
-        pace = f"ahead by {whole_hours}h"
-    else:
         pace = f"behind by {whole_hours}h"
+    else:
+        pace = f"ahead by {whole_hours}h"
     return f"{round(elapsed_pct)}% elapsed • {pace}"
 
 
