@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import tempfile
+import urllib.parse
 import html as _html
 import re
 from datetime import datetime, timezone
@@ -3263,8 +3264,28 @@ class TelegramAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _movie_monitor_apple_url(track_id: str) -> str:
-        # The iTunes/Apple public movie URL accepts the canonical track id.
-        return f"https://itunes.apple.com/us/movie/id{track_id}?uo=4"
+        """Return the Apple buy URL for a movie monitor callback id.
+
+        Numeric ids use the old iTunes movie URL.  The dry-run monitor can also
+        write ``~/.hermes/agents/movies/apple_urls.json`` for Apple TV/search
+        URLs keyed by Letterboxd slug or Apple content id.
+        """
+        try:
+            from hermes_constants import get_hermes_home
+
+            path = get_hermes_home() / "agents" / "movies" / "apple_urls.json"
+            if path.exists():
+                with path.open("r", encoding="utf-8") as f:
+                    urls = json.load(f)
+                mapped = urls.get(str(track_id))
+                if mapped:
+                    return str(mapped)
+        except Exception as exc:
+            logger.debug("Failed to read movie monitor Apple URL map: %s", exc)
+
+        if str(track_id).isdigit():
+            return f"https://itunes.apple.com/us/movie/id{track_id}?uo=4"
+        return "https://tv.apple.com/us/search?term=" + urllib.parse.quote(str(track_id))
 
     def _movie_monitor_markup(
         self,

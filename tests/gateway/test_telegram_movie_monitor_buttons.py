@@ -56,12 +56,12 @@ def _query(data, markup):
 def _base_markup():
     return _Markup([
         [
-            _Button("Dune: Part Two — $4.99", callback_data="mv:sel:1725365997"),
-            _Button("Poor Things — $4.99", callback_data="mv:sel:646332703"),
+            _Button("Dune: Part Two", callback_data="mv:sel:1725365997"),
+            _Button("Poor Things", callback_data="mv:sel:646332703"),
         ],
         [
-            _Button("Asteroid City — $4.99", callback_data="mv:sel:1686832433"),
-            _Button("Arrival — $4.99", callback_data="mv:sel:1163659233"),
+            _Button("Asteroid City", callback_data="mv:sel:1686832433"),
+            _Button("Arrival", callback_data="mv:sel:1163659233"),
         ],
     ])
 
@@ -102,8 +102,8 @@ async def test_bought_marks_movie_and_sends_dry_run_ack(adapter, monkeypatch):
     )
     expanded = _Markup([
         [
-            _Button("▸ Dune: Part Two — $4.99", callback_data="mv:sel:1725365997"),
-            _Button("Poor Things — $4.99", callback_data="mv:sel:646332703"),
+            _Button("▸ Dune: Part Two", callback_data="mv:sel:1725365997"),
+            _Button("Poor Things", callback_data="mv:sel:646332703"),
         ],
         [
             _Button("🍿 Buy on Apple", url="https://itunes.apple.com/us/movie/id1725365997?uo=4"),
@@ -127,7 +127,7 @@ async def test_bought_marks_movie_and_sends_dry_run_ack(adapter, monkeypatch):
     assert recorded == [{
         "action": "bought",
         "track_id": "1725365997",
-        "title": "Dune: Part Two — $4.99",
+        "title": "Dune: Part Two",
         "user_name": "Adrien",
     }]
     sent_markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
