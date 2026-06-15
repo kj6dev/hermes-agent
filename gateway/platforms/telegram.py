@@ -3244,6 +3244,222 @@ class TelegramAdapter(BasePlatformAdapter):
             # Catch-all (e.g. page counter button "mx:noop")
             await query.answer()
 
+    @staticmethod
+    def _movie_monitor_track_id(data: str) -> Optional[str]:
+        """Return the track id from an ``mv:<action>:<track_id>`` callback."""
+        parts = str(data or "").split(":", 2)
+        if len(parts) != 3 or parts[0] != "mv" or not parts[2]:
+            return None
+        return parts[2]
+
+    @staticmethod
+    def _movie_monitor_title_from_label(label: str) -> str:
+        """Clean selection markers from a movie button label for human text."""
+        title = str(label or "Movie").strip()
+        for prefix in ("▸ ", "✓ ", "✅ "):
+            if title.startswith(prefix):
+                title = title[len(prefix):].strip()
+        return title or "Movie"
+
+    @staticmethod
+    def _movie_monitor_apple_url(track_id: str) -> str:
+        # The iTunes/Apple public movie URL accepts the canonical track id.
+        return f"https://itunes.apple.com/us/movie/id{track_id}?uo=4"
+
+    def _movie_monitor_markup(
+        self,
+        reply_markup: Any,
+        *,
+        selected_track_id: Optional[str] = None,
+        bought_track_id: Optional[str] = None,
+    ) -> tuple:
+        """Build the compact/expanded inline keyboard for movie monitor demos.
+
+        Collapsed rows contain movie callback buttons (``mv:sel:<track_id>``).
+        Selecting a movie inserts one action row directly below its row with a
+        real Apple URL button plus a dry-run Bought callback.  Buying marks the
+        selected movie label and removes the expanded action row.
+        """
+        original_rows = list(getattr(reply_markup, "inline_keyboard", None) or [])
+        rows = []
+        selected_title = "Movie"
+        selected_seen = False
+
+        for original_row in original_rows:
+            movie_buttons = []
+            row_has_selected = False
+            row_is_action_row = False
+
+            for button in original_row:
+                callback_data = getattr(button, "callback_data", None)
+                text = self._movie_monitor_title_from_label(getattr(button, "text", ""))
+                url = getattr(button, "url", None)
+
+                if callback_data and str(callback_data).startswith("mv:sel:"):
+                    track_id = self._movie_monitor_track_id(callback_data)
+                    if not track_id:
+                        continue
+                    label = text
+                    if track_id == bought_track_id:
+                        label = f"✓ {text}"
+                        selected_title = text
+                    elif track_id == selected_track_id:
+                        label = f"▸ {text}"
+                        selected_title = text
+                        row_has_selected = True
+                        selected_seen = True
+                    movie_buttons.append(
+                        InlineKeyboardButton(label, callback_data=f"mv:sel:{track_id}")
+                    )
+                    continue
+
+                if callback_data and str(callback_data).startswith(("mv:bought:", "mv:owned:")):
+                    row_is_action_row = True
+                    continue
+                if url and "buy" in str(getattr(button, "text", "")).lower():
+                    row_is_action_row = True
+                    continue
+
+                # Preserve unknown non-movie buttons if they ever share a message.
+                if callback_data:
+                    movie_buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
+                elif url:
+                    movie_buttons.append(InlineKeyboardButton(text, url=url))
+
+            if row_is_action_row and not movie_buttons:
+                continue
+            if movie_buttons:
+                rows.append(movie_buttons)
+            if row_has_selected and selected_track_id and selected_track_id != bought_track_id:
+                rows.append([
+                    InlineKeyboardButton(
+                        "🍿 Buy on Apple",
+                        url=self._movie_monitor_apple_url(selected_track_id),
+                    ),
+                    InlineKeyboardButton(
+                        "✅ Bought",
+                        callback_data=f"mv:bought:{selected_track_id}",
+                    ),
+                ])
+
+        return InlineKeyboardMarkup(rows), selected_title, selected_seen
+
+    def _record_movie_monitor_dry_run_event(
+        self,
+        *,
+        action: str,
+        track_id: str,
+        title: str,
+        user_name: Optional[str] = None,
+    ) -> None:
+        """Append a local dry-run audit event; no Letterboxd side effects."""
+        try:
+            from hermes_constants import get_hermes_home
+
+            path = get_hermes_home() / "agents" / "movies" / "dryrun_events.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "track_id": str(track_id),
+                "title": title,
+                "user": user_name,
+                "dry_run": True,
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.debug("Failed to record movie monitor dry-run event: %s", exc)
+
+    async def _handle_movie_monitor_callback(
+        self,
+        query: Any,
+        data: str,
+        context: Any,
+        *,
+        query_chat_id: Optional[int] = None,
+        query_chat_type: Optional[str] = None,
+        query_thread_id: Optional[int] = None,
+        query_user_name: Optional[str] = None,
+    ) -> None:
+        """Handle movie-monitor inline buttons in dry-run mode.
+
+        Supported callback data:
+        - ``mv:sel:<track_id>``: expand that movie row with Buy/Bought actions.
+        - ``mv:bought:<track_id>`` / ``mv:owned:<track_id>``: dry-run mark owned.
+        """
+        parts = str(data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.answer(text="Invalid movie action.")
+            return
+
+        action = parts[1]
+        track_id = parts[2]
+        if action not in {"sel", "bought", "owned"} or not track_id:
+            await query.answer(text="Unknown movie action.")
+            return
+
+        caller_id = str(getattr(query.from_user, "id", ""))
+        if not self._is_callback_user_authorized(
+            caller_id,
+            chat_id=str(query_chat_id) if query_chat_id is not None else None,
+            chat_type=str(query_chat_type) if query_chat_type is not None else None,
+            thread_id=str(query_thread_id) if query_thread_id is not None else None,
+            user_name=query_user_name,
+        ):
+            await query.answer(text="⛔ You are not authorized to use this movie button.")
+            return
+
+        message = getattr(query, "message", None)
+        reply_markup = getattr(message, "reply_markup", None)
+        if action == "sel":
+            keyboard, title, found = self._movie_monitor_markup(
+                reply_markup,
+                selected_track_id=track_id,
+            )
+            if not found:
+                await query.answer(text="Movie row not found.")
+                return
+            await query.answer(text=f"Selected {title}")
+            try:
+                await query.edit_message_reply_markup(reply_markup=keyboard)
+            except AttributeError:
+                await query.edit_message_text(
+                    text=getattr(message, "text", None) or getattr(message, "caption", None) or "Movie deals",
+                    reply_markup=keyboard,
+                )
+            return
+
+        keyboard, title, _found = self._movie_monitor_markup(
+            reply_markup,
+            bought_track_id=track_id,
+        )
+        self._record_movie_monitor_dry_run_event(
+            action="bought",
+            track_id=track_id,
+            title=title,
+            user_name=query_user_name,
+        )
+        await query.answer(text="Marked bought ✓")
+        try:
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+        except AttributeError:
+            await query.edit_message_text(
+                text=getattr(message, "text", None) or getattr(message, "caption", None) or "Movie deals",
+                reply_markup=keyboard,
+            )
+
+        bot = getattr(context, "bot", None) or getattr(self, "_bot", None)
+        if bot and query_chat_id is not None:
+            try:
+                await bot.send_message(
+                    chat_id=query_chat_id,
+                    message_thread_id=query_thread_id,
+                    text=f"✅ Dry run: marked {title} as bought. Letterboxd not touched yet.",
+                )
+            except Exception as exc:
+                logger.debug("Failed to send movie monitor dry-run ack: %s", exc)
+
     async def _handle_callback_query(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
@@ -3271,6 +3487,19 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._handle_gmail_triage_callback(
                 query,
                 data,
+                query_chat_id=query_chat_id,
+                query_chat_type=query_chat_type,
+                query_thread_id=query_thread_id,
+                query_user_name=query_user_name,
+            )
+            return
+
+        # --- Movie monitor callbacks (mv:action:trackId) ---
+        if data.startswith("mv:"):
+            await self._handle_movie_monitor_callback(
+                query,
+                data,
+                context,
                 query_chat_id=query_chat_id,
                 query_chat_type=query_chat_type,
                 query_thread_id=query_thread_id,
