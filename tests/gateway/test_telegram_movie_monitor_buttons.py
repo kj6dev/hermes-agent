@@ -1,5 +1,7 @@
 """Tests for Telegram movie-monitor dry-run inline buttons."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -155,3 +157,134 @@ async def test_movie_buttons_are_authorized_fail_closed(adapter, monkeypatch):
 
     assert "not authorized" in query.answer.call_args.kwargs["text"]
     query.edit_message_reply_markup.assert_not_called()
+
+
+def _director_markup():
+    return _Markup([
+        [
+            _Button("Dune: Part Three", callback_data="dc:sel:c0"),
+            _Button("Bugonia", callback_data="dc:sel:c1"),
+        ],
+    ])
+
+
+@pytest.fixture
+def director_state(tmp_path, monkeypatch):
+    candidates_path = tmp_path / "director_candidates.json"
+    state_path = tmp_path / "director_state.json"
+    events_path = tmp_path / "dryrun_events.jsonl"
+    candidates_path.write_text(json.dumps({
+        "candidates": [
+            {
+                "id": "c0",
+                "letterboxd": {
+                    "title": "Dune: Part Three",
+                    "year": 2026,
+                    "slug": "dune-part-three",
+                    "url": "https://letterboxd.com/film/dune-part-three/",
+                },
+                "director": {"slug": "denis-villeneuve", "name": "Denis Villeneuve"},
+                "threshold": 4.99,
+            },
+            {
+                "id": "c1",
+                "letterboxd": {
+                    "title": "Bugonia",
+                    "year": 2025,
+                    "slug": "bugonia",
+                    "url": "https://letterboxd.com/film/bugonia/",
+                },
+                "director": {"slug": "yorgos-lanthimos", "name": "Yorgos Lanthimos"},
+                "threshold": 4.99,
+            },
+        ]
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        TelegramAdapter,
+        "_director_state_paths",
+        staticmethod(lambda: (candidates_path, state_path, events_path)),
+    )
+    return candidates_path, state_path, events_path
+
+
+@pytest.mark.asyncio
+async def test_select_director_candidate_expands_action_row(adapter, director_state):
+    query = _query("dc:sel:c0", _director_markup())
+
+    await adapter._handle_director_candidate_callback(
+        query,
+        query.data,
+        query_chat_id=-1003940719735,
+        query_chat_type="supergroup",
+        query_thread_id=1692,
+        query_user_name="Adrien",
+    )
+
+    query.answer.assert_called_once()
+    sent_markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+    assert sent_markup.inline_keyboard[0][0].text.startswith("▸ Dune")
+    action_row = sent_markup.inline_keyboard[1]
+    assert action_row[0].text == "➕ Add to LB"
+    assert action_row[0].url == "https://letterboxd.com/film/dune-part-three/"
+    assert action_row[1].callback_data == "dc:track:c0"
+    assert action_row[2].callback_data == "dc:ignore:c0"
+
+
+@pytest.mark.asyncio
+async def test_director_track_records_price_only_state(adapter, director_state):
+    _candidates_path, state_path, events_path = director_state
+    expanded = _Markup([
+        [_Button("▸ Dune: Part Three", callback_data="dc:sel:c0")],
+        [
+            _Button("➕ Add to LB", url="https://letterboxd.com/film/dune-part-three/"),
+            _Button("⏱ Track price", callback_data="dc:track:c0"),
+            _Button("🚫 Ignore", callback_data="dc:ignore:c0"),
+        ],
+    ])
+    query = _query("dc:track:c0", expanded)
+
+    await adapter._handle_director_candidate_callback(
+        query,
+        query.data,
+        query_chat_id=-1003940719735,
+        query_chat_type="supergroup",
+        query_thread_id=1692,
+        query_user_name="Adrien",
+    )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["tracked_movies"]["dune-part-three"]["director_slug"] == "denis-villeneuve"
+    assert "dune-part-three" not in state["ignored_movies"]
+    assert "director_track" in events_path.read_text(encoding="utf-8")
+    sent_markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+    assert sent_markup.inline_keyboard[0][0].text.startswith("⏱ Dune")
+
+
+@pytest.mark.asyncio
+async def test_director_ignore_records_movie_ignore(adapter, director_state):
+    _candidates_path, state_path, events_path = director_state
+    expanded = _Markup([
+        [_Button("▸ Bugonia", callback_data="dc:sel:c1")],
+        [
+            _Button("➕ Add to LB", url="https://letterboxd.com/film/bugonia/"),
+            _Button("⏱ Track price", callback_data="dc:track:c1"),
+            _Button("🚫 Ignore", callback_data="dc:ignore:c1"),
+        ],
+    ])
+    query = _query("dc:ignore:c1", expanded)
+
+    await adapter._handle_director_candidate_callback(
+        query,
+        query.data,
+        query_chat_id=-1003940719735,
+        query_chat_type="supergroup",
+        query_thread_id=1692,
+        query_user_name="Adrien",
+    )
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["ignored_movies"]["bugonia"]["director_slug"] == "yorgos-lanthimos"
+    assert "bugonia" not in state["tracked_movies"]
+    assert "director_ignore" in events_path.read_text(encoding="utf-8")
+    sent_markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+    assert sent_markup.inline_keyboard[0][0].text.startswith("🚫 Bugonia")

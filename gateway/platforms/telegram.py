@@ -3481,6 +3481,207 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.debug("Failed to send movie monitor dry-run ack: %s", exc)
 
+    @staticmethod
+    def _director_candidate_key(data: str) -> Optional[str]:
+        parts = str(data or "").split(":", 2)
+        if len(parts) != 3 or parts[0] != "dc" or not parts[2]:
+            return None
+        return parts[2]
+
+    @staticmethod
+    def _director_state_paths() -> tuple:
+        from hermes_constants import get_hermes_home
+
+        root = get_hermes_home() / "agents" / "movies"
+        return root / "director_candidates.json", root / "director_state.json", root / "dryrun_events.jsonl"
+
+    def _load_director_candidate(self, candidate_key: str) -> Optional[dict]:
+        try:
+            candidates_path, _state_path, _events_path = self._director_state_paths()
+            report = json.loads(candidates_path.read_text(encoding="utf-8"))
+            for candidate in report.get("candidates", []):
+                movie = candidate.get("letterboxd", {})
+                director = candidate.get("director", {})
+                keys = {
+                    str(candidate.get("id") or ""),
+                    f"{movie.get('slug')}|{director.get('slug')}",
+                    str(movie.get("slug") or ""),
+                }
+                if candidate_key in keys:
+                    return candidate
+        except Exception as exc:
+            logger.debug("Failed to read director candidate state: %s", exc)
+        return None
+
+    @staticmethod
+    def _director_movie_label(label: str) -> str:
+        title = str(label or "Movie").strip()
+        for prefix in ("▸ ", "✓ ", "⏱ ", "🚫 "):
+            if title.startswith(prefix):
+                title = title[len(prefix):].strip()
+        return title or "Movie"
+
+    def _director_candidate_markup(
+        self,
+        reply_markup: Any,
+        *,
+        selected_key: Optional[str] = None,
+        marked_key: Optional[str] = None,
+        marked_prefix: str = "✓",
+    ) -> tuple:
+        original_rows = list(getattr(reply_markup, "inline_keyboard", None) or [])
+        rows = []
+        selected_title = "Movie"
+        selected_seen = False
+
+        for original_row in original_rows:
+            movie_buttons = []
+            row_has_selected = False
+            row_is_action_row = False
+            for button in original_row:
+                callback_data = getattr(button, "callback_data", None)
+                text = self._director_movie_label(getattr(button, "text", ""))
+                url = getattr(button, "url", None)
+                if callback_data and str(callback_data).startswith("dc:sel:"):
+                    key = self._director_candidate_key(callback_data)
+                    if not key:
+                        continue
+                    label = text
+                    if key == marked_key:
+                        label = f"{marked_prefix} {text}"
+                        selected_title = text
+                    elif key == selected_key:
+                        label = f"▸ {text}"
+                        selected_title = text
+                        row_has_selected = True
+                        selected_seen = True
+                    movie_buttons.append(InlineKeyboardButton(label, callback_data=f"dc:sel:{key}"))
+                    continue
+                if callback_data and str(callback_data).startswith(("dc:track:", "dc:ignore:")):
+                    row_is_action_row = True
+                    continue
+                if url and str(getattr(button, "text", "")).lower().startswith(("add", "open")):
+                    row_is_action_row = True
+                    continue
+                if callback_data:
+                    movie_buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
+                elif url:
+                    movie_buttons.append(InlineKeyboardButton(text, url=url))
+            if row_is_action_row and not movie_buttons:
+                continue
+            if movie_buttons:
+                rows.append(movie_buttons)
+            if row_has_selected and selected_key and selected_key != marked_key:
+                candidate = self._load_director_candidate(selected_key) or {}
+                movie = candidate.get("letterboxd", {})
+                url = movie.get("url") or f"https://letterboxd.com/film/{selected_key.split('|', 1)[0]}/"
+                rows.append([
+                    InlineKeyboardButton("➕ Add to LB", url=str(url)),
+                    InlineKeyboardButton("⏱ Track price", callback_data=f"dc:track:{selected_key}"),
+                    InlineKeyboardButton("🚫 Ignore", callback_data=f"dc:ignore:{selected_key}"),
+                ])
+        return InlineKeyboardMarkup(rows), selected_title, selected_seen
+
+    def _record_director_action(self, *, action: str, candidate_key: str, user_name: Optional[str]) -> tuple:
+        candidates_path, state_path, events_path = self._director_state_paths()
+        candidate = self._load_director_candidate(candidate_key)
+        if not candidate:
+            return "Movie", None
+        movie = candidate.get("letterboxd", {})
+        director = candidate.get("director", {})
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        except json.JSONDecodeError:
+            state = {}
+        state.setdefault("tracked_movies", {})
+        state.setdefault("ignored_movies", {})
+        state.setdefault("ignored_directors", [])
+        slug = str(movie.get("slug") or candidate_key.split("|", 1)[0])
+        if action == "track":
+            state["tracked_movies"][slug] = {
+                "title": movie.get("title"),
+                "year": movie.get("year"),
+                "url": movie.get("url"),
+                "source": "director",
+                "director_slug": director.get("slug"),
+                "director_name": director.get("name"),
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            }
+        elif action == "ignore":
+            state["ignored_movies"][slug] = {
+                "title": movie.get("title"),
+                "year": movie.get("year"),
+                "url": movie.get("url"),
+                "director_slug": director.get("slug"),
+                "director_name": director.get("name"),
+                "ignored_at": datetime.now(timezone.utc).isoformat(),
+            }
+        state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "action": f"director_{action}",
+            "candidate_key": candidate_key,
+            "movie": movie,
+            "director": director,
+            "user": user_name,
+            "dry_run": False,
+        }
+        with events_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        return str(movie.get("title") or "Movie"), candidate
+
+    async def _handle_director_candidate_callback(
+        self,
+        query: Any,
+        data: str,
+        *,
+        query_chat_id: Optional[int] = None,
+        query_chat_type: Optional[str] = None,
+        query_thread_id: Optional[int] = None,
+        query_user_name: Optional[str] = None,
+    ) -> None:
+        parts = str(data or "").split(":", 2)
+        if len(parts) != 3 or parts[1] not in {"sel", "track", "ignore"}:
+            await query.answer(text="Invalid director action.")
+            return
+        action = parts[1]
+        candidate_key = parts[2]
+        caller_id = str(getattr(query.from_user, "id", ""))
+        if not self._is_callback_user_authorized(
+            caller_id,
+            chat_id=str(query_chat_id) if query_chat_id is not None else None,
+            chat_type=str(query_chat_type) if query_chat_type is not None else None,
+            thread_id=str(query_thread_id) if query_thread_id is not None else None,
+            user_name=query_user_name,
+        ):
+            await query.answer(text="⛔ You are not authorized to use this movie button.")
+            return
+        message = getattr(query, "message", None)
+        reply_markup = getattr(message, "reply_markup", None)
+        if action == "sel":
+            keyboard, title, found = self._director_candidate_markup(reply_markup, selected_key=candidate_key)
+            if not found:
+                await query.answer(text="Movie row not found.")
+                return
+            await query.answer(text=f"Selected {title}")
+        else:
+            title, _candidate = self._record_director_action(action=action, candidate_key=candidate_key, user_name=query_user_name)
+            prefix = "⏱" if action == "track" else "🚫"
+            keyboard, _title, _found = self._director_candidate_markup(
+                reply_markup,
+                marked_key=candidate_key,
+                marked_prefix=prefix,
+            )
+            await query.answer(text=("Tracking" if action == "track" else "Ignored") + f" {title}")
+        try:
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+        except AttributeError:
+            await query.edit_message_text(
+                text=getattr(message, "text", None) or getattr(message, "caption", None) or "Director Radar",
+                reply_markup=keyboard,
+            )
+
     async def _handle_callback_query(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
@@ -3506,6 +3707,18 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- Gmail-triage callbacks (gt:verb:arg) ---
         if data.startswith("gt:"):
             await self._handle_gmail_triage_callback(
+                query,
+                data,
+                query_chat_id=query_chat_id,
+                query_chat_type=query_chat_type,
+                query_thread_id=query_thread_id,
+                query_user_name=query_user_name,
+            )
+            return
+
+        # --- Director candidate callbacks (dc:action:movieSlug|directorSlug) ---
+        if data.startswith("dc:"):
+            await self._handle_director_candidate_callback(
                 query,
                 data,
                 query_chat_id=query_chat_id,
