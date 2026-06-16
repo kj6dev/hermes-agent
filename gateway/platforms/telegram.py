@@ -3287,6 +3287,24 @@ class TelegramAdapter(BasePlatformAdapter):
             return f"https://itunes.apple.com/us/movie/id{track_id}?uo=4"
         return "https://tv.apple.com/us/search?term=" + urllib.parse.quote(str(track_id))
 
+    @staticmethod
+    def _movie_monitor_letterboxd_url(track_id: str) -> Optional[str]:
+        """Return the Letterboxd web URL for a movie monitor callback id."""
+        try:
+            from hermes_constants import get_hermes_home
+
+            path = get_hermes_home() / "agents" / "movies" / "track_to_slug.json"
+            if not path.exists():
+                return None
+            mapping = json.loads(path.read_text(encoding="utf-8"))
+            slug = mapping.get(str(track_id))
+            if not slug:
+                return None
+            return f"https://letterboxd.com/film/{slug}/"
+        except Exception as exc:
+            logger.debug("Failed to read movie monitor Letterboxd URL map: %s", exc)
+            return None
+
     def _movie_monitor_markup(
         self,
         reply_markup: Any,
@@ -3294,12 +3312,10 @@ class TelegramAdapter(BasePlatformAdapter):
         selected_track_id: Optional[str] = None,
         bought_track_id: Optional[str] = None,
     ) -> tuple:
-        """Build the compact/expanded inline keyboard for movie monitor demos.
+        """Build the compact/expanded inline keyboard for movie monitor alerts.
 
         Collapsed rows contain movie callback buttons (``mv:sel:<track_id>``).
-        Selecting a movie inserts one action row directly below its row with a
-        real Apple URL button plus a dry-run Bought callback.  Buying marks the
-        selected movie label and removes the expanded action row.
+        Selecting a movie inserts an action row with Apple and Letterboxd links.
         """
         original_rows = list(getattr(reply_markup, "inline_keyboard", None) or [])
         rows = []
@@ -3337,7 +3353,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if callback_data and str(callback_data).startswith(("mv:bought:", "mv:owned:")):
                     row_is_action_row = True
                     continue
-                if url and "buy" in str(getattr(button, "text", "")).lower():
+                if url and any(word in str(getattr(button, "text", "")).lower() for word in ("apple", "letterboxd", "buy", "open")):
                     row_is_action_row = True
                     continue
 
@@ -3352,16 +3368,16 @@ class TelegramAdapter(BasePlatformAdapter):
             if movie_buttons:
                 rows.append(movie_buttons)
             if row_has_selected and selected_track_id and selected_track_id != bought_track_id:
-                rows.append([
+                action_row = [
                     InlineKeyboardButton(
-                        "🍿 Buy on Apple",
+                        "Apple",
                         url=self._movie_monitor_apple_url(selected_track_id),
-                    ),
-                    InlineKeyboardButton(
-                        "✅ Bought",
-                        callback_data=f"mv:bought:{selected_track_id}",
-                    ),
-                ])
+                    )
+                ]
+                letterboxd_url = self._movie_monitor_letterboxd_url(selected_track_id)
+                if letterboxd_url:
+                    action_row.append(InlineKeyboardButton("Letterboxd", url=letterboxd_url))
+                rows.append(action_row)
 
         return InlineKeyboardMarkup(rows), selected_title, selected_seen
 

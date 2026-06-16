@@ -36,6 +36,7 @@ def adapter(monkeypatch):
     instance = TelegramAdapter(config)
     instance._bot = AsyncMock()
     monkeypatch.setattr(instance, "_is_callback_user_authorized", lambda *a, **k: True)
+    monkeypatch.setattr(instance, "_movie_monitor_letterboxd_url", lambda track_id: f"https://letterboxd.com/film/test-{track_id}/")
     return instance
 
 
@@ -88,10 +89,10 @@ async def test_select_movie_expands_action_row(adapter):
     sent_markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
     assert sent_markup.inline_keyboard[0][0].text.startswith("▸ Dune")
     action_row = sent_markup.inline_keyboard[1]
-    assert action_row[0].text == "🍿 Buy on Apple"
+    assert action_row[0].text == "Apple"
     assert action_row[0].url == "https://itunes.apple.com/us/movie/id1725365997?uo=4"
-    assert action_row[1].text == "✅ Bought"
-    assert action_row[1].callback_data == "mv:bought:1725365997"
+    assert action_row[1].text == "Letterboxd"
+    assert action_row[1].url == "https://letterboxd.com/film/test-1725365997/"
 
 
 @pytest.mark.asyncio
